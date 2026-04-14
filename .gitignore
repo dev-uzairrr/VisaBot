@@ -14,3 +14,4 @@ debug-*.png
 .vscode/
 
 *.png
+*.traineddata

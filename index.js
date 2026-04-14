@@ -267,7 +267,7 @@ async function selectWorkNationalVisaCategory(page) {
     .first();
   const found = (await target.count().catch(() => 0)) > 0;
   if (!found) {
-    logger.warn("catrgoey not found");
+    logger.warn("category not found");
     return false;
   }
 
