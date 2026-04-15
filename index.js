@@ -262,19 +262,131 @@ async function solvePostLoginMathGate(page, timeoutMs = 90000) {
 }
 
 async function selectWorkNationalVisaCategory(page) {
-  const target = page
-    .locator('a:has-text("WORK National VISA"), text=WORK National VISA')
-    .first();
-  const found = (await target.count().catch(() => 0)) > 0;
-  if (!found) {
-    logger.warn("category not found");
-    return false;
+  const timeoutMs = Number(process.env.CATEGORY_WAIT_MS || "120000");
+  const pollMs = Number(process.env.CATEGORY_POLL_MS || "2000");
+  const started = Date.now();
+  let attempt = 0;
+  const categoryName = process.env.CATEGORY_NAME || "Schengen VISA";
+  const categoryRegex = new RegExp(
+    categoryName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"),
+    "i"
+  );
+
+  logger.info(
+    { timeoutMs, pollMs, categoryName },
+    "Waiting for category to become available"
+  );
+
+  while (Date.now() - started < timeoutMs) {
+    attempt += 1;
+    const candidates = [
+      page
+        .locator(
+          `a:has-text("${categoryName}"), button:has-text("${categoryName}"), text=${categoryName}`
+        )
+        .first(),
+      page.locator("a, button").filter({ hasText: categoryRegex }).first(),
+    ];
+
+    for (const candidate of candidates) {
+      const visible = await candidate.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      const candidateText = (await candidate.innerText().catch(() => "")).trim();
+      const candidateHref = await candidate.getAttribute("href").catch(() => null);
+      const beforeUrl = page.url();
+      logger.info(
+        { attempt, categoryName, beforeUrl, candidateText, candidateHref },
+        "Category found and attempting click"
+      );
+      await candidate.click({ timeout: 5000 });
+      await page.waitForTimeout(1000);
+      await page.waitForLoadState("domcontentloaded").catch(() => {});
+      const afterUrl = page.url();
+      const urlChanged = afterUrl !== beforeUrl;
+
+      logger.info(
+        { attempt, categoryName, beforeUrl, afterUrl, urlChanged },
+        "CLICK_CONFIRMED: Category clicked"
+      );
+      return true;
+    }
+
+    const elapsedSec = Math.floor((Date.now() - started) / 1000);
+    if (attempt % 5 === 0) {
+      logger.info(
+        { attempt, elapsedSec, url: page.url() },
+        "Category not visible yet, retrying"
+      );
+    }
+    await page.waitForTimeout(pollMs);
   }
 
-  await target.click();
-  await page.waitForLoadState("domcontentloaded");
-  logger.info({ url: page.url() }, "Selected WORK National VISA category");
-  return true;
+  logger.warn(
+    { waitedMs: timeoutMs, attempts: attempt, categoryName, url: page.url() },
+    "Category not visible yet (likely not live yet)"
+  );
+  return false;
+}
+
+async function selectAvailableView(page) {
+  const timeoutMs = Number(process.env.AVAILABLE_VIEW_WAIT_MS || "60000");
+  const pollMs = Number(process.env.AVAILABLE_VIEW_POLL_MS || "1500");
+  const started = Date.now();
+  let attempt = 0;
+
+  logger.info({ timeoutMs, pollMs }, "Waiting for schedule view dropdown");
+
+  while (Date.now() - started < timeoutMs) {
+    attempt += 1;
+
+    const dropdownTriggerCandidates = [
+      page.locator("button, a, span, div").filter({ hasText: /^Week$/i }).first(),
+      page.locator("button, a, span, div").filter({ hasText: /Month|Week|Day|Agenda|Available/i }).first(),
+    ];
+
+    let opened = false;
+    for (const trigger of dropdownTriggerCandidates) {
+      const visible = await trigger.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      const triggerText = (await trigger.innerText().catch(() => "")).trim();
+      logger.info({ attempt, triggerText }, "DROPDOWN_CLICKED: Opening schedule view dropdown");
+      await trigger.click({ timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(500);
+      opened = true;
+      break;
+    }
+
+    const availableOption = page
+      .locator("li, a, button, span, div")
+      .filter({ hasText: /^Available$/i })
+      .first();
+    const availableVisible = await availableOption.isVisible().catch(() => false);
+
+    if (!opened && !availableVisible) {
+      if (attempt % 5 === 0) {
+        logger.info({ attempt, url: page.url() }, "View dropdown not ready yet, retrying");
+      }
+      await page.waitForTimeout(pollMs);
+      continue;
+    }
+
+    if (availableVisible) {
+      await availableOption.click({ timeout: 5000 });
+      await page.waitForTimeout(1200);
+      logger.info({ attempt, url: page.url() }, "AVAILABLE_SELECTED: Switched schedule view to Available");
+      return true;
+    }
+
+    await page.waitForTimeout(pollMs);
+  }
+
+  logger.warn(
+    { waitedMs: timeoutMs, attempts: attempt, url: page.url() },
+    "Failed to switch schedule view to Available within wait window"
+  );
+  return false;
 }
 
 (async () => {
@@ -332,6 +444,7 @@ async function selectWorkNationalVisaCategory(page) {
   await page.waitForLoadState("domcontentloaded");
   await solvePostLoginMathGate(page, 90000);
   await selectWorkNationalVisaCategory(page);
+  await selectAvailableView(page);
   logger.info({ url: page.url() }, "Current URL after login");
 
   logger.info("Browser left open for manual verification");
