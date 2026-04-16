@@ -389,6 +389,269 @@ async function selectAvailableView(page) {
   return false;
 }
 
+async function createAppointmentFromFirstAvailableSlot(page) {
+  const timeoutMs = Number(process.env.SLOT_WAIT_MS || "120000");
+  const pollMs = Number(process.env.SLOT_POLL_MS || "1500");
+  const started = Date.now();
+  let attempt = 0;
+
+  logger.info({ timeoutMs, pollMs }, "Waiting for first available appointment slot");
+
+  while (Date.now() - started < timeoutMs) {
+    attempt += 1;
+
+    const slotButton = page
+      .locator('a, button, [role="button"]')
+      .filter({ hasText: /^\+$/ })
+      .first();
+    const slotVisible = await slotButton.isVisible().catch(() => false);
+
+    if (slotVisible) {
+      const slotRow = slotButton.locator("xpath=ancestor::tr[1]").first();
+      const slotRowText = (await slotRow.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+      logger.info(
+        { attempt, slotRowText },
+        "PLUS_SLOT_FOUND: Clicking first available slot"
+      );
+      await slotButton.click({ timeout: 5000 });
+      await page.waitForTimeout(1000);
+
+      const created = await fillAndSubmitAppointmentDialog(page, { slotRowText });
+      if (created) {
+        return true;
+      }
+    }
+
+    if (attempt % 5 === 0) {
+      const elapsedSec = Math.floor((Date.now() - started) / 1000);
+      logger.info({ attempt, elapsedSec, url: page.url() }, "Available slot not visible yet, retrying");
+    }
+
+    await page.waitForTimeout(pollMs);
+  }
+
+  logger.warn(
+    { waitedMs: timeoutMs, attempts: attempt, url: page.url() },
+    "No available slot appeared within wait window"
+  );
+  return false;
+}
+
+async function fillAndSubmitAppointmentDialog(page, context = {}) {
+  const userFullName = process.env.USER_FULL_NAME;
+  const userPhone = process.env.USER_PHONE;
+  const userMobile = process.env.USER_MOBILE;
+
+  if (!userFullName || !userPhone || !userMobile) {
+    throw new Error("Missing USER_FULL_NAME, USER_PHONE, or USER_MOBILE in .env #userdata");
+  }
+
+  const dialog = page
+    .locator('text=New Appointment')
+    .locator('xpath=ancestor::*[self::div or self::section][1]')
+    .first();
+  const dialogVisible = await dialog.isVisible().catch(() => false);
+  if (!dialogVisible) {
+    logger.warn(
+      { slotRowText: context.slotRowText || null },
+      "New Appointment dialog did not appear after clicking slot"
+    );
+    return false;
+  }
+
+  const dialogText = (await dialog.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+  const timeInputs = dialog.locator('input[readonly], input[disabled]');
+  const fromValue = await timeInputs.nth(0).inputValue().catch(() => "");
+  const toValue = await timeInputs.nth(1).inputValue().catch(() => "");
+
+  logger.info(
+    {
+      slotRowText: context.slotRowText || null,
+      fromValue,
+      toValue,
+      dialogPreview: dialogText.slice(0, 250),
+    },
+    "APPOINTMENT_DIALOG_OPEN: Filling appointment form"
+  );
+
+  const textInputs = dialog.locator(
+    'input:not([type="hidden"]):not([type="submit"]):not([readonly]):not([disabled])'
+  );
+  const inputCount = await textInputs.count().catch(() => 0);
+  if (inputCount < 3) {
+    logger.warn({ inputCount }, "Appointment dialog inputs not found as expected");
+    return false;
+  }
+
+  const fullNameInput = textInputs.nth(0);
+  const phoneInput = textInputs.nth(1);
+  const mobileInput = textInputs.nth(2);
+
+  await fullNameInput.fill(userFullName);
+  await phoneInput.fill(userPhone);
+  await mobileInput.fill(userMobile);
+
+  logger.info(
+    {
+      slotRowText: context.slotRowText || null,
+      fromValue,
+      toValue,
+      userFullName,
+      userPhone,
+      userMobile,
+    },
+    "APPOINTMENT_FORM_FILLED: User data entered into appointment dialog"
+  );
+
+  const createButton = dialog
+    .locator('button:has-text("Create appointment"), input[type="submit"]')
+    .first();
+  const createButtonText = (await createButton.innerText().catch(() => "")).trim();
+  logger.info(
+    {
+      slotRowText: context.slotRowText || null,
+      fromValue,
+      toValue,
+      createButtonText,
+    },
+    "APPOINTMENT_SUBMIT_READY: Clicking create appointment button"
+  );
+  await createButton.click({ timeout: 5000 });
+  await page.waitForTimeout(1500);
+
+  logger.info(
+    {
+      url: page.url(),
+      slotRowText: context.slotRowText || null,
+      fromValue,
+      toValue,
+    },
+    "APPOINTMENT_SUBMITTED: Create appointment clicked"
+  );
+  return true;
+}
+
+function envBool(value, defaultValue = false) {
+  if (value === undefined || value === null || value === "") return defaultValue;
+  return String(value).trim().toLowerCase() === "true";
+}
+
+function mask(value, keepStart = 2, keepEnd = 2) {
+  const s = String(value ?? "");
+  if (s.length <= keepStart + keepEnd) return "*".repeat(Math.max(4, s.length));
+  return `${s.slice(0, keepStart)}***${s.slice(-keepEnd)}`;
+}
+
+async function fillPostAppointmentDetailsForm(page) {
+  const timeoutMs = Number(process.env.POST_FORM_WAIT_MS || "90000");
+  const pollMs = Number(process.env.POST_FORM_POLL_MS || "1500");
+  const started = Date.now();
+  let attempt = 0;
+
+  const region = process.env.USER_REGION_EMPLOYMENT_IN_GREECE;
+  const am = process.env.USER_AM;
+  const apofasiYear = process.env.USER_APOFASI_YEAR;
+  const apofasiNumber = process.env.USER_APOFASI_NUMBER;
+  const employerName = process.env.USER_GREEK_EMPLOYER_NAME;
+  const passportNumber = process.env.USER_PASSPORT_NUMBER;
+  const declare = envBool(process.env.USER_DECLARE_INFORMATIVE, true);
+
+  if (!region || !am || !apofasiYear || !apofasiNumber || !employerName || !passportNumber) {
+    throw new Error(
+      "Missing USER_REGION_EMPLOYMENT_IN_GREECE, USER_AM, USER_APOFASI_YEAR, USER_APOFASI_NUMBER, USER_GREEK_EMPLOYER_NAME, or USER_PASSPORT_NUMBER in .env #userdata"
+    );
+  }
+
+  logger.info({ timeoutMs, pollMs }, "Waiting for post-appointment APOFASI details form");
+
+  const header = page
+    .locator("text=APOFASI DETAILS, text=APOFASI Details, text=APOFASI")
+    .first();
+
+  while (Date.now() - started < timeoutMs) {
+    attempt += 1;
+    const visible = await header.isVisible().catch(() => false);
+    if (visible) break;
+
+    if (attempt % 5 === 0) {
+      const elapsedSec = Math.floor((Date.now() - started) / 1000);
+      logger.info(
+        { attempt, elapsedSec, url: page.url() },
+        "Post-appointment form not visible yet, retrying"
+      );
+    }
+    await page.waitForTimeout(pollMs);
+  }
+
+  const headerVisible = await header.isVisible().catch(() => false);
+  if (!headerVisible) {
+    logger.warn({ waitedMs: timeoutMs, attempts: attempt, url: page.url() }, "APOFASI form not detected");
+    return false;
+  }
+
+  logger.info({ url: page.url() }, "POST_FORM_DETECTED: Filling APOFASI details");
+
+  const rowFor = (labelTextUpper) =>
+    page.locator(
+      `xpath=//*[contains(translate(normalize-space(.),"abcdefghijklmnopqrstuvwxyz","ABCDEFGHIJKLMNOPQRSTUVWXYZ"),"${labelTextUpper}")]/ancestor::*[self::div or self::tr or self::li][1]`
+    ).first();
+
+  const fillSelectInRow = async (row, value, fieldName) => {
+    const select = row.locator("select").first();
+    await select.waitFor({ state: "visible", timeout: 15000 });
+    await select.selectOption({ label: value }).catch(async () => {
+      await select.selectOption({ value }).catch(async () => {
+        await select.selectOption({ index: 1 }).catch(() => {});
+      });
+    });
+    const selected = await select.inputValue().catch(() => "");
+    logger.info({ field: fieldName, value, selected }, "POST_FORM_FIELD_SET");
+  };
+
+  const fillInputInRow = async (row, value, fieldName, maskValue = false) => {
+    const input = row.locator('input:not([type="hidden"]):not([type="submit"])').first();
+    await input.waitFor({ state: "visible", timeout: 15000 });
+    await input.fill(String(value));
+    logger.info(
+      { field: fieldName, value: maskValue ? mask(value) : String(value) },
+      "POST_FORM_FIELD_SET"
+    );
+  };
+
+  await fillSelectInRow(
+    rowFor("REGION OF EMPLOYMENT IN GREECE"),
+    region,
+    "REGION_OF_EMPLOYMENT_IN_GREECE"
+  );
+  await fillInputInRow(rowFor("AM("), am, "AM");
+  await fillSelectInRow(rowFor("APOFASI YEAR"), apofasiYear, "APOFASI_YEAR");
+  await fillInputInRow(rowFor("APOFASI NUMBER ONLY"), apofasiNumber, "APOFASI_NUMBER_ONLY");
+  await fillInputInRow(rowFor("GREEK EMPLOYER'S NAME"), employerName, "GREEK_EMPLOYER_NAME");
+  await fillInputInRow(rowFor("APPLICANT'S PASSPORT NUMBER"), passportNumber, "PASSPORT_NUMBER", true);
+
+  const declareRow = rowFor("DECLARE THAT ALL ABOVE INFORMATIVE");
+  const declareCheckbox = declareRow.locator('input[type="checkbox"]').first();
+  const cbVisible = await declareCheckbox.isVisible().catch(() => false);
+  if (cbVisible) {
+    const checked = await declareCheckbox.isChecked().catch(() => false);
+    if (declare && !checked) {
+      await declareCheckbox.check().catch(async () => {
+        await declareCheckbox.click().catch(() => {});
+      });
+    }
+    const finalChecked = await declareCheckbox.isChecked().catch(() => false);
+    logger.info(
+      { field: "DECLARE_INFORMATIVE", desired: declare, checked: finalChecked },
+      "POST_FORM_FIELD_SET"
+    );
+  } else {
+    logger.warn("Declare checkbox not found/visible");
+  }
+
+  logger.info({ url: page.url() }, "POST_FORM_READY: APOFASI details filled");
+  return true;
+}
+
 (async () => {
   const browser = await chromium.launch({
     headless: process.env.HEADLESS === "true",
@@ -406,8 +669,12 @@ async function selectAvailableView(page) {
   await injectTurnstileInterceptor(page);
 
   logger.info("Navigating...");
+  const websiteUrl = process.env.WEBSITE_URL;
+  if (!websiteUrl) {
+    throw new Error("Missing WEBSITE_URL in .env");
+  }
   await page.goto(
-    "https://schedule.cf-grcon-isl-pakistan.com/schedule/grcon-isl-pakistan",
+    websiteUrl,
     { waitUntil: "domcontentloaded" }
   );
 
@@ -445,6 +712,8 @@ async function selectAvailableView(page) {
   await solvePostLoginMathGate(page, 90000);
   await selectWorkNationalVisaCategory(page);
   await selectAvailableView(page);
+  await createAppointmentFromFirstAvailableSlot(page);
+  await fillPostAppointmentDetailsForm(page);
   logger.info({ url: page.url() }, "Current URL after login");
 
   logger.info("Browser left open for manual verification");
