@@ -599,13 +599,34 @@ async function fillPostAppointmentDetailsForm(page) {
   const fillSelectInRow = async (row, value, fieldName) => {
     const select = row.locator("select").first();
     await select.waitFor({ state: "visible", timeout: 15000 });
-    await select.selectOption({ label: value }).catch(async () => {
-      await select.selectOption({ value }).catch(async () => {
-        await select.selectOption({ index: 1 }).catch(() => {});
+    const normalizedTarget = String(value).replace(/\s+/g, " ").trim().toLowerCase();
+    const options = await select.locator("option").allTextContents().catch(() => []);
+    const cleanedOptions = options.map((o) => o.replace(/\s+/g, " ").trim());
+    const matchedLabel = cleanedOptions.find(
+      (opt) => opt.toLowerCase() === normalizedTarget
+    ) || cleanedOptions.find((opt) => opt.toLowerCase().includes(normalizedTarget));
+
+    if (matchedLabel) {
+      await select.selectOption({ label: matchedLabel }).catch(async () => {
+        await select.selectOption({ value: matchedLabel }).catch(async () => {
+          await select.selectOption({ label: value }).catch(async () => {
+            await select.selectOption({ value }).catch(() => {});
+          });
+        });
       });
-    });
+    } else {
+      await select.selectOption({ label: value }).catch(async () => {
+        await select.selectOption({ value }).catch(async () => {
+          await select.selectOption({ index: 1 }).catch(() => {});
+        });
+      });
+    }
+
     const selected = await select.inputValue().catch(() => "");
-    logger.info({ field: fieldName, value, selected }, "POST_FORM_FIELD_SET");
+    logger.info(
+      { field: fieldName, value, matchedLabel: matchedLabel || null, selected, options: cleanedOptions },
+      "POST_FORM_FIELD_SET"
+    );
   };
 
   const fillInputInRow = async (row, value, fieldName, maskValue = false) => {
