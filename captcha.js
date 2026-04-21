@@ -1,14 +1,15 @@
 import fetch from "node-fetch";
 import { logger } from "./logger.js";
 
-const API_KEY = process.env.API_KEY;
-
-export async function solveTurnstile(params, page) {
+export async function solveTurnstile(params, page, apiKey) {
+  if (!apiKey) {
+    throw new Error("Missing API key for 2Captcha");
+  }
   logger.info("Submitting captcha to 2Captcha");
 
   const request = {
     method: "turnstile",
-    key: API_KEY,
+    key: apiKey,
     sitekey: params.sitekey,
     pageurl: page.url(),
     data: params.cData,
@@ -42,7 +43,7 @@ export async function solveTurnstile(params, page) {
     await new Promise((r) => setTimeout(r, 5000));
 
     const result = await fetch(
-      `https://2captcha.com/res.php?key=${API_KEY}&action=get&id=${requestId}&json=1`,
+      `https://2captcha.com/res.php?key=${apiKey}&action=get&id=${requestId}&json=1`,
     ).then((r) => r.json());
 
     if (result.status === 1) {

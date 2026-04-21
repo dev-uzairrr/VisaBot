@@ -4,6 +4,7 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { evaluate } from "mathjs";
 import { injectTurnstileInterceptor, handleCloudflare } from "./cloudflare.js";
 import { logger } from "./logger.js";
+import { closeDb, getActiveAccounts, initDb, seedAccountsIfEmpty } from "./db.js";
 
 chromium.use(StealthPlugin());
 const MATH_EXPRESSION_REGEX = /(\d+)\s*([+\-*/xX×÷＋－])\s*(\d+)\s*=?/;
@@ -193,7 +194,7 @@ async function solveStandaloneMathGate(page, options = {}) {
   return false;
 }
 
-async function ensureLoginFormVisible(page, emailInput, timeoutMs = 30000) {
+async function ensureLoginFormVisible(page, emailInput, account, timeoutMs = 30000) {
   const started = Date.now();
   let attempt = 0;
   while (Date.now() - started < timeoutMs) {
@@ -204,7 +205,7 @@ async function ensureLoginFormVisible(page, emailInput, timeoutMs = 30000) {
     const title = await page.title().catch(() => "");
     if (title.includes("Just a moment") || title.includes("Verification")) {
       logger.warn("Cloudflare challenge still active, retrying bypass...");
-      await handleCloudflare(page, 4);
+      await handleCloudflare(page, account.api_key, 4);
       continue;
     }
 
@@ -261,12 +262,12 @@ async function solvePostLoginMathGate(page, timeoutMs = 90000) {
   return false;
 }
 
-async function selectWorkNationalVisaCategory(page) {
-  const timeoutMs = Number(process.env.CATEGORY_WAIT_MS || "120000");
-  const pollMs = Number(process.env.CATEGORY_POLL_MS || "2000");
+async function selectWorkNationalVisaCategory(page, account) {
+  const timeoutMs = Number(account.category_wait_ms || "120000");
+  const pollMs = Number(account.category_poll_ms || "2000");
   const started = Date.now();
   let attempt = 0;
-  const categoryName = process.env.CATEGORY_NAME || "Schengen VISA";
+  const categoryName = account.category_name || "Schengen VISA";
   const categoryRegex = new RegExp(
     categoryName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"),
     "i"
@@ -329,9 +330,9 @@ async function selectWorkNationalVisaCategory(page) {
   return false;
 }
 
-async function selectAvailableView(page) {
-  const timeoutMs = Number(process.env.AVAILABLE_VIEW_WAIT_MS || "60000");
-  const pollMs = Number(process.env.AVAILABLE_VIEW_POLL_MS || "1500");
+async function selectAvailableView(page, account) {
+  const timeoutMs = Number(account.available_view_wait_ms || "60000");
+  const pollMs = Number(account.available_view_poll_ms || "1500");
   const started = Date.now();
   let attempt = 0;
 
@@ -389,9 +390,9 @@ async function selectAvailableView(page) {
   return false;
 }
 
-async function createAppointmentFromFirstAvailableSlot(page) {
-  const timeoutMs = Number(process.env.SLOT_WAIT_MS || "120000");
-  const pollMs = Number(process.env.SLOT_POLL_MS || "1500");
+async function createAppointmentFromFirstAvailableSlot(page, account) {
+  const timeoutMs = Number(account.slot_wait_ms || "120000");
+  const pollMs = Number(account.slot_poll_ms || "1500");
   const started = Date.now();
   let attempt = 0;
 
@@ -416,7 +417,7 @@ async function createAppointmentFromFirstAvailableSlot(page) {
       await slotButton.click({ timeout: 5000 });
       await page.waitForTimeout(1000);
 
-      const created = await fillAndSubmitAppointmentDialog(page, { slotRowText });
+      const created = await fillAndSubmitAppointmentDialog(page, account, { slotRowText });
       if (created) {
         return true;
       }
@@ -437,10 +438,10 @@ async function createAppointmentFromFirstAvailableSlot(page) {
   return false;
 }
 
-async function fillAndSubmitAppointmentDialog(page, context = {}) {
-  const userFullName = process.env.USER_FULL_NAME;
-  const userPhone = process.env.USER_PHONE;
-  const userMobile = process.env.USER_MOBILE;
+async function fillAndSubmitAppointmentDialog(page, account, context = {}) {
+  const userFullName = account.user_full_name;
+  const userPhone = account.user_phone;
+  const userMobile = account.user_mobile;
 
   if (!userFullName || !userPhone || !userMobile) {
     throw new Error("Missing USER_FULL_NAME, USER_PHONE, or USER_MOBILE in .env #userdata");
@@ -542,19 +543,19 @@ function mask(value, keepStart = 2, keepEnd = 2) {
   return `${s.slice(0, keepStart)}***${s.slice(-keepEnd)}`;
 }
 
-async function fillPostAppointmentDetailsForm(page) {
-  const timeoutMs = Number(process.env.POST_FORM_WAIT_MS || "90000");
-  const pollMs = Number(process.env.POST_FORM_POLL_MS || "1500");
+async function fillPostAppointmentDetailsForm(page, account) {
+  const timeoutMs = Number(account.post_form_wait_ms || "90000");
+  const pollMs = Number(account.post_form_poll_ms || "1500");
   const started = Date.now();
   let attempt = 0;
 
-  const region = process.env.USER_REGION_EMPLOYMENT_IN_GREECE;
-  const am = process.env.USER_AM;
-  const apofasiYear = process.env.USER_APOFASI_YEAR;
-  const apofasiNumber = process.env.USER_APOFASI_NUMBER;
-  const employerName = process.env.USER_GREEK_EMPLOYER_NAME;
-  const passportNumber = process.env.USER_PASSPORT_NUMBER;
-  const declare = envBool(process.env.USER_DECLARE_INFORMATIVE, true);
+  const region = account.user_region_employment_in_greece;
+  const am = account.user_am;
+  const apofasiYear = account.user_apofasi_year;
+  const apofasiNumber = account.user_apofasi_number;
+  const employerName = account.user_greek_employer_name;
+  const passportNumber = account.user_passport_number;
+  const declare = envBool(account.user_declare_informative, true);
 
   if (!region || !am || !apofasiYear || !apofasiNumber || !employerName || !passportNumber) {
     throw new Error(
@@ -673,69 +674,91 @@ async function fillPostAppointmentDetailsForm(page) {
   return true;
 }
 
-(async () => {
+async function runSingleAccountFlow(account) {
   const browser = await chromium.launch({
-    headless: process.env.HEADLESS === "true",
+    headless: envBool(account.headless, false),
   });
+  try {
+    const context = await browser.newContext({
+      proxy: account.proxy_server
+        ? { server: account.proxy_server }
+        : undefined,
+      viewport: { width: 1280, height: 800 },
+    });
 
-  const context = await browser.newContext({
-    proxy: process.env.PROXY_SERVER
-      ? { server: process.env.PROXY_SERVER }
-      : undefined,
-    viewport: { width: 1280, height: 800 },
-  });
+    const page = await context.newPage();
 
-  const page = await context.newPage();
+    await injectTurnstileInterceptor(page);
 
-  await injectTurnstileInterceptor(page);
+    logger.info({ label: account.label, login: mask(account.login_email) }, "Starting account flow");
+    const websiteUrl = account.website_url;
+    if (!websiteUrl) {
+      throw new Error("Missing website_url in account record");
+    }
+    await page.goto(
+      websiteUrl,
+      { waitUntil: "domcontentloaded" }
+    );
 
-  logger.info("Navigating...");
-  const websiteUrl = process.env.WEBSITE_URL;
-  if (!websiteUrl) {
-    throw new Error("Missing WEBSITE_URL in .env");
+    await handleCloudflare(page, account.api_key);
+
+    logger.info("Attempting login...");
+    const loginEmail = account.login_email;
+    const loginPassword = account.login_password;
+    if (!loginEmail || !loginPassword) {
+      throw new Error("Missing login_email or login_password in account record");
+    }
+
+    await page.waitForLoadState("domcontentloaded");
+    const emailInput = page
+      .locator(
+        'input[type="email"]:visible, input[name*="mail" i]:visible, input[id*="mail" i]:visible, input[autocomplete="username"]:visible'
+      )
+      .first();
+    const passwordInput = page
+      .locator(
+        'input[type="password"]:visible, input[name*="pass" i]:visible, input[id*="pass" i]:visible'
+      )
+      .first();
+    const loginButton = page
+      .locator('button:has-text("Log in"), input[type="submit"], button[type="submit"]')
+      .first();
+
+    await ensureLoginFormVisible(page, emailInput, account, 60000);
+    await emailInput.fill(loginEmail);
+    await passwordInput.fill(loginPassword);
+    await loginButton.click();
+
+    logger.info("Login submitted");
+    await page.waitForLoadState("domcontentloaded");
+    await solvePostLoginMathGate(page, 90000);
+    await selectWorkNationalVisaCategory(page, account);
+    await selectAvailableView(page, account);
+    await createAppointmentFromFirstAvailableSlot(page, account);
+    await fillPostAppointmentDetailsForm(page, account);
+    logger.info({ url: page.url() }, "Current URL after login");
+  } finally {
+    await browser.close().catch(() => {});
   }
-  await page.goto(
-    websiteUrl,
-    { waitUntil: "domcontentloaded" }
-  );
+}
 
-  await handleCloudflare(page);
-
-  logger.info("Attempting login...");
-  const loginEmail = process.env.LOGIN_EMAIL;
-  const loginPassword = process.env.LOGIN_PASSWORD;
-  if (!loginEmail || !loginPassword) {
-    throw new Error("Missing LOGIN_EMAIL or LOGIN_PASSWORD in .env");
+(async () => {
+  initDb();
+  seedAccountsIfEmpty();
+  const accounts = getActiveAccounts();
+  if (accounts.length === 0) {
+    throw new Error("No active accounts found in database");
   }
 
-  await page.waitForLoadState("domcontentloaded");
-  const emailInput = page
-    .locator(
-      'input[type="email"]:visible, input[name*="mail" i]:visible, input[id*="mail" i]:visible, input[autocomplete="username"]:visible'
-    )
-    .first();
-  const passwordInput = page
-    .locator(
-      'input[type="password"]:visible, input[name*="pass" i]:visible, input[id*="pass" i]:visible'
-    )
-    .first();
-  const loginButton = page
-    .locator('button:has-text("Log in"), input[type="submit"], button[type="submit"]')
-    .first();
-
-  await ensureLoginFormVisible(page, emailInput, 60000);
-  await emailInput.fill(loginEmail);
-  await passwordInput.fill(loginPassword);
-  await loginButton.click();
-
-  logger.info("Login submitted");
-  await page.waitForLoadState("domcontentloaded");
-  await solvePostLoginMathGate(page, 90000);
-  await selectWorkNationalVisaCategory(page);
-  await selectAvailableView(page);
-  await createAppointmentFromFirstAvailableSlot(page);
-  await fillPostAppointmentDetailsForm(page);
-  logger.info({ url: page.url() }, "Current URL after login");
-
-  logger.info("Browser left open for manual verification");
+  for (const account of accounts) {
+    try {
+      await runSingleAccountFlow(account);
+    } catch (error) {
+      logger.error(
+        { label: account.label, login: mask(account.login_email), error: String(error) },
+        "Account flow failed, continuing with next account"
+      );
+    }
+  }
+  closeDb();
 })();

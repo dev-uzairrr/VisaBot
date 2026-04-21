@@ -40,7 +40,7 @@ async function applySolution(page, token) {
   }, token);
 }
 
-export async function handleCloudflare(page, retries = 3) {
+export async function handleCloudflare(page, apiKey, retries = 3) {
   for (let i = 0; i < retries; i++) {
     const title = await page.title();
 
@@ -55,7 +55,7 @@ export async function handleCloudflare(page, retries = 3) {
       const params = await getParams(page);
       logger.info("Params extracted");
 
-      const token = await solveTurnstile(params, page);
+      const token = await solveTurnstile(params, page, apiKey);
       await applySolution(page, token);
 
       await page.waitForNavigation({ timeout: 60000 });
