@@ -4,7 +4,15 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { evaluate } from "mathjs";
 import { injectTurnstileInterceptor, handleCloudflare } from "./cloudflare.js";
 import { logger } from "./logger.js";
-import { closeDb, getActiveAccounts, initDb, seedAccountsIfEmpty } from "./db.js";
+import {
+  closeDb,
+  createBookingStatus,
+  getBookingStatusById,
+  getActiveAccounts,
+  initDb,
+  seedAccountsIfEmpty,
+  updateBookingStatus,
+} from "./db.js";
 
 chromium.use(StealthPlugin());
 const MATH_EXPRESSION_REGEX = /(\d+)\s*([+\-*/xX×÷＋－])\s*(\d+)\s*=?/;
@@ -674,7 +682,7 @@ async function fillPostAppointmentDetailsForm(page, account) {
   return true;
 }
 
-async function runSingleAccountFlow(account) {
+async function runSingleAccountFlow(account, statusId) {
   const browser = await chromium.launch({
     headless: envBool(account.headless, false),
   });
@@ -734,7 +742,20 @@ async function runSingleAccountFlow(account) {
     await solvePostLoginMathGate(page, 90000);
     await selectWorkNationalVisaCategory(page, account);
     await selectAvailableView(page, account);
-    await createAppointmentFromFirstAvailableSlot(page, account);
+    const appointmentCreated = await createAppointmentFromFirstAvailableSlot(page, account);
+    if (appointmentCreated) {
+      updateBookingStatus(statusId, {
+        status: "BOOKED",
+        appointment_booked: 1,
+        notes: "Appointment created successfully",
+      });
+    } else {
+      updateBookingStatus(statusId, {
+        status: "NOT_BOOKED",
+        appointment_booked: 0,
+        notes: "No slot available in configured wait window",
+      });
+    }
     await fillPostAppointmentDetailsForm(page, account);
     logger.info({ url: page.url() }, "Current URL after login");
   } finally {
@@ -751,11 +772,29 @@ async function runSingleAccountFlow(account) {
   }
 
   for (const account of accounts) {
+    const statusId = createBookingStatus(account.id, {
+      status: "IN_PROGRESS",
+      appointment_booked: 0,
+      notes: "Account flow started",
+    });
     try {
-      await runSingleAccountFlow(account);
+      await runSingleAccountFlow(account, statusId);
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const currentStatus = getBookingStatusById(statusId);
+      if (currentStatus?.status !== "BOOKED") {
+        updateBookingStatus(statusId, {
+          status: "FAILED",
+          appointment_booked: 0,
+          notes: errorMessage.slice(0, 1000),
+        });
+      } else {
+        updateBookingStatus(statusId, {
+          notes: `Booked, then later step failed: ${errorMessage}`.slice(0, 1000),
+        });
+      }
       logger.error(
-        { label: account.label, login: mask(account.login_email), error: String(error) },
+        { label: account.label, login: mask(account.login_email), error: errorMessage },
         "Account flow failed, continuing with next account"
       );
     }

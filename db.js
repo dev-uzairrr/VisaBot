@@ -189,6 +189,86 @@ export function deleteAccount(id) {
   db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
 }
 
+export function createBookingStatus(accountId, data = {}) {
+  const stmt = db.prepare(`
+    INSERT INTO booking_status (
+      account_id, status, appointment_booked, appointment_reference, notes, created_at, updated_at
+    ) VALUES (
+      @account_id, @status, @appointment_booked, @appointment_reference, @notes, @created_at, @updated_at
+    )
+  `);
+  const ts = nowIso();
+  const result = stmt.run({
+    account_id: accountId,
+    status: data.status || "PENDING",
+    appointment_booked: data.appointment_booked ?? 0,
+    appointment_reference: data.appointment_reference || null,
+    notes: data.notes || null,
+    created_at: ts,
+    updated_at: ts,
+  });
+  return result.lastInsertRowid;
+}
+
+export function updateBookingStatus(statusId, patch = {}) {
+  const allowed = new Set([
+    "status",
+    "appointment_booked",
+    "appointment_reference",
+    "notes",
+  ]);
+  const safePatch = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (allowed.has(key)) safePatch[key] = value;
+  }
+  const columns = Object.keys(safePatch);
+  if (columns.length === 0) return;
+  const setClause = columns.map((c) => `${c} = @${c}`).join(", ");
+  db.prepare(`UPDATE booking_status SET ${setClause}, updated_at = @updated_at WHERE id = @id`).run({
+    id: statusId,
+    ...safePatch,
+    updated_at: nowIso(),
+  });
+}
+
+export function getBookingStatusById(statusId) {
+  return db.prepare("SELECT * FROM booking_status WHERE id = ?").get(statusId);
+}
+
+export function listLatestBookingStatuses() {
+  return db.prepare(`
+    SELECT
+      a.id AS account_id,
+      a.label,
+      a.login_email,
+      a.active,
+      bs.id AS status_id,
+      bs.status,
+      bs.appointment_booked,
+      bs.appointment_reference,
+      bs.notes,
+      bs.created_at,
+      bs.updated_at
+    FROM accounts a
+    LEFT JOIN booking_status bs
+      ON bs.id = (
+        SELECT b2.id
+        FROM booking_status b2
+        WHERE b2.account_id = a.id
+        ORDER BY b2.id DESC
+        LIMIT 1
+      )
+    ORDER BY a.id ASC
+  `).all();
+}
+
+export function cleanupSmokeBookingStatusRows() {
+  const result = db
+    .prepare("DELETE FROM booking_status WHERE notes IN ('smoke', 'smoke-test')")
+    .run();
+  return result.changes;
+}
+
 export function closeDb() {
   db.close();
 }

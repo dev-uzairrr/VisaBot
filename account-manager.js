@@ -1,5 +1,15 @@
 import "dotenv/config";
-import { addAccount, closeDb, deleteAccount, initDb, listAccounts, seedAccountsIfEmpty, updateAccount } from "./db.js";
+import {
+  addAccount,
+  cleanupSmokeBookingStatusRows,
+  closeDb,
+  deleteAccount,
+  initDb,
+  listAccounts,
+  listLatestBookingStatuses,
+  seedAccountsIfEmpty,
+  updateAccount,
+} from "./db.js";
 
 function parseArgs(argv) {
   const args = {};
@@ -24,6 +34,33 @@ const args = parseArgs(rest);
 
 if (cmd === "list") {
   console.table(listAccounts());
+  closeDb();
+  process.exit(0);
+}
+
+if (cmd === "status") {
+  const only = String(args.only || "").toLowerCase();
+  const statusFilter = args.status ? String(args.status).toUpperCase() : null;
+  let rows = listLatestBookingStatuses();
+
+  if (only === "active") {
+    rows = rows.filter((row) => Number(row.active) === 1);
+  } else if (only === "inactive") {
+    rows = rows.filter((row) => Number(row.active) === 0);
+  }
+
+  if (statusFilter) {
+    rows = rows.filter((row) => String(row.status || "").toUpperCase() === statusFilter);
+  }
+
+  console.table(rows);
+  closeDb();
+  process.exit(0);
+}
+
+if (cmd === "status:cleanup") {
+  const removed = cleanupSmokeBookingStatusRows();
+  console.log(`Removed ${removed} smoke status row(s)`);
   closeDb();
   process.exit(0);
 }
@@ -104,6 +141,10 @@ if (cmd === "update") {
 console.log(`
 Usage:
   npm run db:list
+  npm run db:status
+  npm run db:status -- --only=active
+  npm run db:status -- --status=FAILED
+  npm run db:status:cleanup
   npm run db:add -- --label=acc1 --login_email=user@example.com --login_password=secret --website_url=https://...
   npm run db:update -- --id=1 --active=0 --category_name="Schengen VISA"
   npm run db:delete -- --id=1
